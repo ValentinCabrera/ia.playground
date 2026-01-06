@@ -49,6 +49,23 @@ const UnifiedChat = ({
   acceptedFileTypes = "",
   initialSystemMessage = ""
 }) => {
+  const { isConfigured } = useOpenAI();
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [file, setFile] = useState(null);
+  const [filePreview, setFilePreview] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [isWaiting, setIsWaiting] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  
+  // Model Parameters (kept internal for Chat mode, or could be lifted up)
+  const [model, setModel] = useState('gpt-4o');
+  const [temperature, setTemperature] = useState(0.7);
+  const [maxTokens, setMaxTokens] = useState(1000);
+
+  const messagesEndRef = useRef(null);
+  const fileInputRef = useRef(null);
+
   // Audio Recording States
   const [isRecording, setIsRecording] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
@@ -129,6 +146,164 @@ const UnifiedChat = ({
     const min = Math.floor(sec / 60);
     const s = sec % 60;
     return `${min}:${s < 10 ? '0' : ''}${s}`;
+  };
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, filePreview]);
+
+  const handleFileSelect = (e) => {
+    const selectedFile = e.target.files[0];
+    if (selectedFile) {
+      setFile(selectedFile);
+      if (selectedFile.type.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onloadend = () => setFilePreview(reader.result);
+        reader.readAsDataURL(selectedFile);
+      } else if (selectedFile.type.startsWith('audio/')) {
+        setFilePreview(URL.createObjectURL(selectedFile));
+      }
+    }
+  };
+
+  const clearFile = () => {
+    setFile(null);
+    setFilePreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleSend = async () => {
+    if ((!input.trim() && !file) || !isConfigured || loading) return;
+
+    // 1. Create User Message
+    const userContent = input;
+    const userAttachment = filePreview;
+    const userFileType = file?.type;
+    
+    const userMessage = { 
+      role: 'user', 
+      content: userContent,
+      attachment: userAttachment,
+      fileType: userFileType
+    };
+
+    setMessages(prev => [...prev, userMessage]);
+    setInput('');
+    setLoading(true);
+    setIsWaiting(true);
+
+    // Clear file input immediately from UI
+    const currentFile = file;
+    clearFile();
+
+    try {
+      // 2. Prepare Assistant Message Placeholder
+      setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+
+      // 3. Call Processor
+      const result = await onProcessMessage({ 
+        text: userContent, 
+        file: currentFile, 
+        messages: [...messages, userMessage],
+        model, 
+        temperature, 
+        maxTokens 
+      });
+
+      if (result && typeof result[Symbol.asyncIterator] === 'function') {
+        // Handle Stream
+        let fullContent = '';
+        for await (const chunk of result) {
+          const content = chunk.choices?.[0]?.delta?.content || ''; 
+          if (content) {
+            if (setIsWaiting) setIsWaiting(false);
+            fullContent += content;
+            setMessages(prev => {
+              const newMessages = [...prev];
+              newMessages[newMessages.length - 1] = { 
+                role: 'assistant', 
+                content: fullContent 
+              };
+              return newMessages;
+            });
+          }
+        }
+      } else {
+        // Handle Static Text Response
+        setIsWaiting(false);
+        setMessages(prev => {
+          const newMessages = [...prev];
+          newMessages[newMessages.length - 1] = { 
+            role: 'assistant', 
+            content: result 
+          };
+          return newMessages;
+        });
+      }
+
+    } catch (error) {
+      console.error("Error processing message:", error);
+      setMessages(prev => {
+        const newMessages = [...prev];
+        if (newMessages[newMessages.length - 1].role === 'assistant' && !newMessages[newMessages.length - 1].content) {
+             newMessages[newMessages.length - 1] = { role: 'assistant', content: `Error: ${error.message}`, isError: true };
+        } else {
+             newMessages.push({ role: 'assistant', content: `Error: ${error.message}`, isError: true });
+        }
+        return newMessages;
+      });
+    } finally {
+      setLoading(false);
+      setIsWaiting(false);
+    }
+  };
+
+  const clearChat = () => {
+    setMessages([]);
+    clearFile();
+    setInput('');
+  };
+
+  const renderAttachment = (msg) => {
+    if (!msg.attachment) return null;
+
+    if (msg.fileType?.startsWith('image/')) {
+      return (
+        <Paper elevation={0} sx={{ 
+          p: 1, 
+          bgcolor: 'rgba(0,0,0,0.2)', 
+          borderRadius: 2, 
+          mb: 1, 
+          maxWidth: 250,
+          border: '1px solid rgba(255,255,255,0.1)'
+        }}>
+          <img src={msg.attachment} alt="Upload" style={{ width: '100%', borderRadius: 8, display: 'block' }} />
+        </Paper>
+      );
+    } else if (msg.fileType?.startsWith('audio/')) {
+      return (
+        <Paper elevation={0} sx={{ 
+          p: 1.5, 
+          bgcolor: 'rgba(0,0,0,0.2)', 
+          borderRadius: 4, 
+          mb: 1, 
+          width: '100%',
+          minWidth: 200,
+          border: '1px solid rgba(255,255,255,0.1)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1
+        }}>
+          <FileAudio size={20} color="#7c4dff" />
+          <audio src={msg.attachment} controls style={{ height: 30, maxWidth: '100%' }} />
+        </Paper>
+      );
+    }
+    return null;
   };
 
   // ... (existing helper functions) ...
@@ -447,5 +622,8 @@ const UnifiedChat = ({
           </IconButton>
         )}
       </Box>
+    </Box>
+  );
+};
 
 export default UnifiedChat;
