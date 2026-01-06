@@ -33,7 +33,9 @@ import {
   Mic, 
   Upload,
   FileAudio,
-  Plus
+  Plus,
+  X,
+  Check
 } from 'lucide-react';
 import { useOpenAI } from '../context/OpenAIContext';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -47,186 +49,94 @@ const UnifiedChat = ({
   acceptedFileTypes = "",
   initialSystemMessage = ""
 }) => {
-  const { isConfigured } = useOpenAI();
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState('');
-  const [file, setFile] = useState(null);
-  const [filePreview, setFilePreview] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [isWaiting, setIsWaiting] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  
-  // Model Parameters (kept internal for Chat mode, or could be lifted up)
-  const [model, setModel] = useState('gpt-4o');
-  const [temperature, setTemperature] = useState(0.7);
-  const [maxTokens, setMaxTokens] = useState(1000);
-
-  const messagesEndRef = useRef(null);
-  const fileInputRef = useRef(null);
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  // Audio Recording States
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const timerRef = useRef(null);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages, filePreview]); // Scroll when preview appears too
-
-  const handleFileSelect = (e) => {
-    const selectedFile = e.target.files[0];
-    if (selectedFile) {
-      setFile(selectedFile);
-      if (selectedFile.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onloadend = () => setFilePreview(reader.result);
-        reader.readAsDataURL(selectedFile);
-      } else if (selectedFile.type.startsWith('audio/')) {
-        setFilePreview(URL.createObjectURL(selectedFile));
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+        mediaRecorderRef.current.stop();
       }
-    }
-  };
-
-  const clearFile = () => {
-    setFile(null);
-    setFilePreview(null);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const handleSend = async () => {
-    if ((!input.trim() && !file) || !isConfigured || loading) return;
-
-    // 1. Create User Message
-    const userContent = input;
-    const userAttachment = filePreview;
-    const userFileType = file?.type;
-    
-    const userMessage = { 
-      role: 'user', 
-      content: userContent,
-      attachment: userAttachment,
-      fileType: userFileType
     };
+  }, []);
 
-    setMessages(prev => [...prev, userMessage]);
-    setInput('');
-    setLoading(true);
-    setIsWaiting(true);
-
-    // Clear file input immediately from UI
-    const currentFile = file;
-    clearFile();
-
+  const startRecording = async () => {
     try {
-      // 2. Prepare Assistant Message Placeholder
-      setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
 
-      // 3. Call Processor
-      const result = await onProcessMessage({ 
-        text: userContent, 
-        file: currentFile, 
-        messages: [...messages, userMessage],
-        model, 
-        temperature, 
-        maxTokens 
-      });
-
-      if (result && typeof result[Symbol.asyncIterator] === 'function') {
-        // Handle Stream
-        let fullContent = '';
-        for await (const chunk of result) {
-          const content = chunk.choices?.[0]?.delta?.content || ''; // Generic structure check
-          if (content) {
-            if (setIsWaiting) setIsWaiting(false);
-            fullContent += content;
-            setMessages(prev => {
-              const newMessages = [...prev];
-              newMessages[newMessages.length - 1] = { 
-                role: 'assistant', 
-                content: fullContent 
-              };
-              return newMessages;
-            });
-          }
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
         }
-      } else {
-        // Handle Static Text Response (e.g. Transcription)
-        setIsWaiting(false);
-        setMessages(prev => {
-          const newMessages = [...prev];
-          newMessages[newMessages.length - 1] = { 
-            role: 'assistant', 
-            content: result 
-          };
-          return newMessages;
-        });
-      }
+      };
+
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' }); // or audio/webm
+        const audioFile = new File([audioBlob], "grabacion_de_voz.wav", { type: 'audio/wav' });
+        setFile(audioFile);
+        setFilePreview(URL.createObjectURL(audioBlob));
+        setIsRecording(false);
+        setRecordingDuration(0);
+        stream.getTracks().forEach(track => track.stop()); // Stop mic usage
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      
+      timerRef.current = setInterval(() => {
+        setRecordingDuration(prev => prev + 1);
+      }, 1000);
 
     } catch (error) {
-      console.error("Error processing message:", error);
-      setMessages(prev => {
-        const newMessages = [...prev];
-        // Replace loading message or add new error message
-        if (newMessages[newMessages.length - 1].role === 'assistant' && !newMessages[newMessages.length - 1].content) {
-             newMessages[newMessages.length - 1] = { role: 'assistant', content: `Error: ${error.message}`, isError: true };
-        } else {
-             newMessages.push({ role: 'assistant', content: `Error: ${error.message}`, isError: true });
-        }
-        return newMessages;
-      });
-    } finally {
-      setLoading(false);
-      setIsWaiting(false);
+      console.error("Error accessing microphone:", error);
+      alert("No se pudo acceder al micrófono. Por favor verifica los permisos.");
     }
   };
 
-  const clearChat = () => {
-    setMessages([]);
-    clearFile();
-    setInput('');
-  };
-
-  // Helper to render attachment based on type
-  const renderAttachment = (msg) => {
-    if (!msg.attachment) return null;
-
-    if (msg.fileType?.startsWith('image/')) {
-      return (
-        <Paper elevation={0} sx={{ 
-          p: 1, 
-          bgcolor: 'rgba(0,0,0,0.2)', 
-          borderRadius: 2, 
-          mb: 1, 
-          maxWidth: 250,
-          border: '1px solid rgba(255,255,255,0.1)'
-        }}>
-          <img src={msg.attachment} alt="Upload" style={{ width: '100%', borderRadius: 8, display: 'block' }} />
-        </Paper>
-      );
-    } else if (msg.fileType?.startsWith('audio/')) {
-      return (
-        <Paper elevation={0} sx={{ 
-          p: 1.5, 
-          bgcolor: 'rgba(0,0,0,0.2)', 
-          borderRadius: 4, 
-          mb: 1, 
-          width: '100%',
-          minWidth: 200,
-          border: '1px solid rgba(255,255,255,0.1)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 1
-        }}>
-          <FileAudio size={20} color="#7c4dff" />
-          <audio src={msg.attachment} controls style={{ height: 30, maxWidth: '100%' }} />
-        </Paper>
-      );
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      clearInterval(timerRef.current);
     }
-    return null;
   };
 
+  const cancelRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      clearInterval(timerRef.current);
+      setIsRecording(false);
+      setRecordingDuration(0);
+      audioChunksRef.current = [];
+      // Note: onstop will fire, but we handle logic there. Ideally we should set a flag to ignore the file creation if cancelled,
+      // but simpler: we just clear it.
+      // Actually, onstop logic above sets the file. Let's fix that slightly or just clearFile() after.
+      // Better: detach onstop before stopping if cancelling.
+      mediaRecorderRef.current.onstop = null;
+      mediaRecorderRef.current.stop();
+      mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+    }
+  };
+
+  const formatDuration = (sec) => {
+    const min = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${min}:${s < 10 ? '0' : ''}${s}`;
+  };
+
+  // ... (existing helper functions) ...
+
+  // Render Logic Update
   return (
     <Box sx={{ height: 'calc(100vh - 120px)', display: 'flex', flexDirection: 'column' }}>
-      {/* Header */}
+      {/* ... (Header - same) ... */}
       <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <Box>
           <Typography variant="h5" component="div" className="gradient-text" sx={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -266,6 +176,7 @@ const UnifiedChat = ({
           borderRadius: 4
         }}
       >
+        {/* ... (Messages content - same) ... */}
         {messages.length === 0 && (
           <Box sx={{ m: 'auto', textAlign: 'center', maxWidth: 400, opacity: 0.7 }}>
             <Avatar sx={{ width: 64, height: 64, bgcolor: 'primary.dark', m: 'auto', mb: 2 }}>
@@ -273,12 +184,12 @@ const UnifiedChat = ({
             </Avatar>
             <Typography variant="h6" gutterBottom>
               {mode === 'vision' ? 'Sube una imagen para analizar' : 
-               mode === 'transcription' ? 'Sube un audio para transcribir' : 
+               mode === 'transcription' ? 'Graba o sube audio para transcribir' : 
                '¿En qué puedo ayudarte?'}
             </Typography>
             <Typography variant="body2" color="text.secondary">
               {mode === 'vision' ? 'Analizaré objetos, texto y detalles visuales.' : 
-               mode === 'transcription' ? 'Convertiré tu voz o grabaciones a texto usando Whisper.' : 
+               mode === 'transcription' ? 'Usa el micrófono o archivos para convertir voz a texto.' : 
                'Escribe para comenzar una conversación.'}
             </Typography>
           </Box>
@@ -359,7 +270,7 @@ const UnifiedChat = ({
 
       {/* Input Area */}
       <Box sx={{ display: 'flex', gap: 2, alignItems: 'flex-end', pb: 2 }}>
-        {mode !== 'chat' && (
+        {mode !== 'chat' && !isRecording && (
           <>
             <input 
               type="file" 
@@ -368,9 +279,9 @@ const UnifiedChat = ({
               accept={mode === 'vision' ? "image/*" : "audio/*"}
               onChange={handleFileSelect}
             />
-            <Tooltip title={mode === 'vision' ? "Subir Imagen" : "Subir Audio"}>
+            <Tooltip title={mode === 'vision' ? "Subir Imagen" : "Grabar Audio"}>
               <IconButton 
-                onClick={() => fileInputRef.current?.click()}
+                onClick={mode === 'transcription' ? startRecording : () => fileInputRef.current?.click()}
                 sx={{ 
                   bgcolor: 'background.paper', 
                   width: 50, 
@@ -390,10 +301,10 @@ const UnifiedChat = ({
           elevation={0}
           sx={{ 
             flexGrow: 1, 
-            bgcolor: 'background.paper', 
+            bgcolor: isRecording ? '#1e1e1e' : 'background.paper', // Darker background when recording
             borderRadius: 4,
-            border: '1px solid rgba(255,255,255,0.1)',
-            transition: 'border-color 0.2s',
+            border: isRecording ? '1px solid rgba(124, 77, 255, 0.5)' : '1px solid rgba(255,255,255,0.1)',
+            transition: 'all 0.3s',
             '&:focus-within': {
               borderColor: 'primary.main',
               boxShadow: '0 0 0 2px rgba(124, 77, 255, 0.2)'
@@ -401,145 +312,140 @@ const UnifiedChat = ({
             p: 2,
             display: 'flex',
             flexDirection: 'column',
-            gap: 2
+            gap: 2,
+            minHeight: 56,
+            justifyContent: 'center'
           }}
         >
-          {filePreview && (
-            <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-              <Box sx={{ 
-                position: 'relative', 
-                width: 64, 
-                height: 64, 
-                borderRadius: 3, 
-                overflow: 'visible',
-                border: '1px solid rgba(255,255,255,0.1)',
-                bgcolor: 'background.paper',
-                backgroundImage: mode === 'vision' ? `url(${filePreview})` : 'none',
-                backgroundSize: 'cover',
-                backgroundPosition: 'center',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center'
-              }}>
-                {mode !== 'vision' && <FileAudio size={24} color="#7c4dff" />}
-                
-                <IconButton 
-                  size="small" 
-                  onClick={clearFile}
-                  sx={{ 
-                    position: 'absolute',
-                    top: -6,
-                    right: -6,
-                    bgcolor: 'rgba(60,60,60,0.9)', 
-                    color: 'white',
-                    width: 20, 
-                    height: 20,
-                    minHeight: 0,
-                    p: 0,
-                    '&:hover': { bgcolor: 'rgba(90,90,90,1)' },
-                    border: '1px solid rgba(255,255,255,0.2)'
-                  }}
-                >
-                  <Plus size={12} style={{ transform: 'rotate(45deg)' }} />
-                </IconButton>
-              </Box>
-            </Box>
-          )}
+          {isRecording ? (
+             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', px: 1 }}>
+               <IconButton onClick={cancelRecording} size="small" sx={{ bgcolor: 'rgba(255,255,255,0.1)', '&:hover': { bgcolor: 'error.main' } }}>
+                 <X size={18} />
+               </IconButton>
 
-          <InputBase
-            fullWidth
-            multiline
-            maxRows={8}
-            placeholder={
-              mode === 'vision' ? "Descríbe la imagen (opcional)..." :
-              mode === 'transcription' ? "Comentario opcional..." : 
-              placeholder
-            }
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            disabled={mode === 'transcription' || !isConfigured || loading} 
-            onKeyPress={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            sx={{ 
-              fontSize: '1rem',
-              lineHeight: 1.5,
-              color: 'text.primary'
-            }}
-          />
+               {/* Waveform Visualization */}
+               <Box sx={{ flexGrow: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 0.5, height: 24, mx: 2 }}>
+                  {[...Array(12)].map((_, i) => (
+                    <motion.div
+                      key={i}
+                      animate={{ 
+                        height: [4, 12 + Math.random() * 12, 4],
+                        backgroundColor: ['#7c4dff', '#b388ff', '#7c4dff']
+                      }}
+                      transition={{ 
+                        repeat: Infinity, 
+                        duration: 0.5 + Math.random() * 0.5,
+                        delay: i * 0.05
+                      }}
+                      style={{
+                        width: 4,
+                        borderRadius: 2,
+                        backgroundColor: '#7c4dff'
+                      }}
+                    />
+                  ))}
+               </Box>
+
+               <Typography variant="body2" sx={{ fontFamily: 'monospace', minWidth: 40, textAlign: 'center' }}>
+                 {formatDuration(recordingDuration)}
+               </Typography>
+
+               <IconButton onClick={stopRecording} size="small" sx={{ bgcolor: 'primary.main', color: 'white', '&:hover': { bgcolor: 'primary.dark' }, ml: 2 }}>
+                 <Check size={18} />
+               </IconButton>
+             </Box>
+          ) : (
+             <>
+               {filePreview && (
+                <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                  <Box sx={{ 
+                    position: 'relative', 
+                    width: 64, 
+                    height: 64, 
+                    borderRadius: 3, 
+                    overflow: 'visible',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    bgcolor: 'background.paper',
+                    backgroundImage: mode === 'vision' ? `url(${filePreview})` : 'none',
+                    backgroundSize: 'cover',
+                    backgroundPosition: 'center',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    {mode !== 'vision' && <FileAudio size={24} color="#7c4dff" />}
+                    
+                    <IconButton 
+                      size="small" 
+                      onClick={clearFile}
+                      sx={{ 
+                        position: 'absolute',
+                        top: -6,
+                        right: -6,
+                        bgcolor: 'rgba(60,60,60,0.9)', 
+                        color: 'white',
+                        width: 20, 
+                        height: 20,
+                        minHeight: 0,
+                        p: 0,
+                        '&:hover': { bgcolor: 'rgba(90,90,90,1)' },
+                        border: '1px solid rgba(255,255,255,0.2)'
+                      }}
+                    >
+                      <Plus size={12} style={{ transform: 'rotate(45deg)' }} />
+                    </IconButton>
+                  </Box>
+                </Box>
+              )}
+
+              <InputBase
+                fullWidth
+                multiline
+                maxRows={8}
+                placeholder={
+                  mode === 'vision' ? "Descríbe la imagen (opcional)..." :
+                  mode === 'transcription' ? "Graba audio o escribe un comentario..." : 
+                  placeholder
+                }
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                disabled={!isConfigured || loading} 
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+                sx={{ 
+                  fontSize: '1rem',
+                  lineHeight: 1.5,
+                  color: 'text.primary'
+                }}
+              />
+            </>
+          )}
         </Paper>
 
-        <IconButton 
-          color="primary" 
-          disabled={(!input.trim() && !file) || !isConfigured || loading}
-          onClick={handleSend}
-          sx={{ 
-            bgcolor: 'primary.main', 
-            color: 'white',
-            '&:hover': { bgcolor: 'primary.dark' },
-            width: 50,
-            height: 50,
-            borderRadius: '50%',
-            mb: 0.5,
-            transition: '0.2s',
-            opacity: (!input.trim() && !file) ? 0.5 : 1
-          }}
-        >
-          <Send size={24} />
-        </IconButton>
+        {!isRecording && (
+          <IconButton 
+            color="primary" 
+            disabled={(!input.trim() && !file) || !isConfigured || loading}
+            onClick={handleSend}
+            sx={{ 
+              bgcolor: 'primary.main', 
+              color: 'white',
+              '&:hover': { bgcolor: 'primary.dark' },
+              width: 50,
+              height: 50,
+              borderRadius: '50%',
+              mb: 0.5,
+              transition: '0.2s',
+              opacity: (!input.trim() && !file) ? 0.5 : 1
+            }}
+          >
+            <Send size={24} />
+          </IconButton>
+        )}
       </Box>
-
-      {/* Settings Drawer (Only for Chat mode by default, or if we passed enableSettings) */}
-      <Drawer
-        anchor="right"
-        open={showSettings}
-        onClose={() => setShowSettings(false)}
-        sx={{ zIndex: (theme) => theme.zIndex.drawer + 2 }}
-        PaperProps={{ sx: { width: 320, p: 4, bgcolor: 'background.paper' } }}
-      >
-        <Typography variant="h6" gutterBottom display="flex" alignItems="center" gap={1}>
-          <SettingsIcon size={20} /> Ajustes del Chat
-        </Typography>
-        <Divider sx={{ my: 2 }} />
-        
-        <Stack spacing={4}>
-          <FormControl fullWidth>
-            <InputLabel>Modelo</InputLabel>
-            <Select value={model} label="Modelo" onChange={(e) => setModel(e.target.value)}>
-              <MenuItem value="gpt-4o">gpt-4o</MenuItem>
-              <MenuItem value="gpt-4o-mini">gpt-4o-mini</MenuItem>
-              <MenuItem value="gpt-3.5-turbo">gpt-3.5-turbo</MenuItem>
-            </Select>
-          </FormControl>
-
-          <Box>
-            <Typography gutterBottom variant="body2">Temperatura: {temperature}</Typography>
-            <Slider 
-              value={temperature} 
-              min={0} 
-              max={2} 
-              step={0.1} 
-              onChange={(e, val) => setTemperature(val)} 
-            />
-          </Box>
-
-          <Box>
-            <Typography gutterBottom variant="body2">Tokens Máximos: {maxTokens}</Typography>
-            <Slider 
-              value={maxTokens} 
-              min={1} 
-              max={4000} 
-              step={100} 
-              onChange={(e, val) => setMaxTokens(val)} 
-            />
-          </Box>
-        </Stack>
-      </Drawer>
-    </Box>
-  );
-};
 
 export default UnifiedChat;
