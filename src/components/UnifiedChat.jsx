@@ -18,7 +18,12 @@ import {
   Divider,
   Card,
   CardMedia,
-  InputBase
+  InputBase,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button
 } from '@mui/material';
 import { 
   Send, 
@@ -57,6 +62,7 @@ const UnifiedChat = ({
   const [loading, setLoading] = useState(false);
   const [isWaiting, setIsWaiting] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showCode, setShowCode] = useState(false);
   
   // Model Parameters (kept internal for Chat mode, or could be lifted up)
   const [model, setModel] = useState('gpt-4o');
@@ -72,6 +78,54 @@ const UnifiedChat = ({
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const timerRef = useRef(null);
+
+  // Code Snippets
+  const codeSnippets = {
+    chat: `// Chat Completion with Streaming
+const response = await openai.chat.completions.create({
+  model: "${model}",
+  messages: [
+    { role: "system", content: "${initialSystemMessage || 'You are a helpful assistant.'}" },
+    ...messages,
+    { role: "user", content: "${input || 'Hola'}" }
+  ],
+  temperature: ${temperature},
+  max_tokens: ${maxTokens},
+  stream: true
+});
+
+for await (const chunk of response) {
+  process.stdout.write(chunk.choices[0]?.delta?.content || "");
+}`,
+    vision: `// Vision Analysis
+const response = await openai.chat.completions.create({
+  model: "gpt-4o",
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "${input || 'Describe esta imagen'}" },
+        { 
+          type: "image_url", 
+          image_url: { 
+            url: "data:image/jpeg;base64,..." 
+          } 
+        }
+      ]
+    }
+  ],
+  max_tokens: 500
+});
+
+console.log(response.choices[0]);`,
+    transcription: `// Audio Transcription (Whisper)
+const transcription = await openai.audio.transcriptions.create({
+  file: audioFile, // fs.createReadStream("audio.wav")
+  model: "whisper-1",
+});
+
+console.log(transcription.text);`
+  };
 
   useEffect(() => {
     return () => {
@@ -322,6 +376,11 @@ const UnifiedChat = ({
           </Typography>
         </Box>
         <Stack direction="row" spacing={1}>
+          <Tooltip title="Ver Código">
+            <IconButton onClick={() => setShowCode(true)} size="small" sx={{ color: 'text.secondary' }}>
+              <Code size={20} />
+            </IconButton>
+          </Tooltip>
           <Tooltip title="Limpiar Chat">
             <IconButton onClick={clearChat} size="small" sx={{ color: 'text.secondary' }}>
               <Trash2 size={20} />
@@ -622,6 +681,110 @@ const UnifiedChat = ({
           </IconButton>
         )}
       </Box>
+      {/* Settings Drawer */}
+      <Drawer
+        anchor="right"
+        open={showSettings}
+        onClose={() => setShowSettings(false)}
+        sx={{ zIndex: (theme) => theme.zIndex.drawer + 2 }}
+        PaperProps={{ sx: { width: 320, p: 4, bgcolor: 'background.paper' } }}
+      >
+        <Typography variant="h6" gutterBottom display="flex" alignItems="center" gap={1}>
+          <SettingsIcon size={20} /> Ajustes del Chat
+        </Typography>
+        <Divider sx={{ my: 2 }} />
+        
+        <Stack spacing={4}>
+          <FormControl fullWidth>
+            <InputLabel>Modelo</InputLabel>
+            <Select value={model} label="Modelo" onChange={(e) => setModel(e.target.value)}>
+              <MenuItem value="gpt-4o">gpt-4o</MenuItem>
+              <MenuItem value="gpt-4o-mini">gpt-4o-mini</MenuItem>
+              <MenuItem value="gpt-3.5-turbo">gpt-3.5-turbo</MenuItem>
+            </Select>
+          </FormControl>
+
+          <Box>
+            <Typography gutterBottom variant="body2">Temperatura: {temperature}</Typography>
+            <Slider 
+              value={temperature} 
+              min={0} 
+              max={2} 
+              step={0.1} 
+              onChange={(e, val) => setTemperature(val)} 
+            />
+          </Box>
+
+          <Box>
+            <Typography gutterBottom variant="body2">Tokens Máximos: {maxTokens}</Typography>
+            <Slider 
+              value={maxTokens} 
+              min={1} 
+              max={4000} 
+              step={100} 
+              onChange={(e, val) => setMaxTokens(val)} 
+            />
+          </Box>
+        </Stack>
+      </Drawer>
+
+      {/* Code Snippet Dialog */}
+      <Dialog 
+        open={showCode} 
+        onClose={() => setShowCode(false)}
+        maxWidth="md"
+        fullWidth
+        PaperProps={{
+          sx: { 
+            bgcolor: '#1e1e1e', 
+            color: '#fff',
+            borderRadius: 3,
+            border: '1px solid rgba(255,255,255,0.1)'
+          }
+        }}
+      >
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+          <Code size={20} color="#7c4dff" /> Ejemplo de Código ({mode})
+        </DialogTitle>
+        <DialogContent sx={{ p: 3 }}>
+          <Box 
+            component="pre" 
+            sx={{ 
+              m: 0, 
+              p: 2, 
+              bgcolor: '#000', 
+              borderRadius: 2, 
+              overflowX: 'auto',
+              fontFamily: 'monospace',
+              fontSize: '0.875rem',
+              color: '#d4d4d4',
+              '& .keyword': { color: '#569cd6' },
+              '& .string': { color: '#ce9178' },
+              '& .comment': { color: '#6a9955' },
+              '& .function': { color: '#dcdcaa' }
+            }}
+          >
+            <code>
+              {codeSnippets[mode]}
+            </code>
+          </Box>
+        </DialogContent>
+        <DialogActions sx={{ borderTop: '1px solid rgba(255,255,255,0.1)', p: 2 }}>
+          <Button onClick={() => setShowCode(false)} sx={{ color: 'text.secondary' }}>
+            Cerrar
+          </Button>
+          <Button 
+            variant="contained" 
+            startIcon={<Copy size={16} />}
+            onClick={() => {
+              navigator.clipboard.writeText(codeSnippets[mode]);
+            }}
+            sx={{ bgcolor: '#7c4dff', '&:hover': { bgcolor: '#651fff' } }}
+          >
+            Copiar
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };
